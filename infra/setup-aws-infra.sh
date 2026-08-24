@@ -12,6 +12,18 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# En Git Bash (Windows), MSYS reescribe argumentos que parecen rutas POSIX
+# absolutas (ej. "/ecs/demo-task") antes de pasarlos al aws.exe nativo,
+# lo que rompe nombres de recursos AWS que empiezan con "/". Se excluye ese
+# prefijo de la conversion. No afecta a Linux/Mac (la variable simplemente
+# no se usa alli).
+export MSYS2_ARG_CONV_EXCL="/ecs"
+
+# Carpeta temporal relativa (no absoluta) para los JSON de trust policy,
+# asi se evita la ambiguedad de "/tmp" entre Git Bash y Windows nativo.
+TMP_DIR="$(dirname "$0")/.infra-tmp"
+mkdir -p "${TMP_DIR}"
+
 AWS_REGION="us-east-1"
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
@@ -50,7 +62,7 @@ aws logs create-log-group --log-group-name "${LOG_GROUP}" --region "${AWS_REGION
 #    Permite a ECS descargar la imagen de ECR y escribir logs en CloudWatch.
 # ---------------------------------------------------------------------------
 if ! aws iam get-role --role-name ecsTaskExecutionRole >/dev/null 2>&1; then
-  cat > /tmp/ecs-trust-policy.json <<'EOF'
+  cat > "${TMP_DIR}/ecs-trust-policy.json" <<'EOF'
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -62,7 +74,7 @@ if ! aws iam get-role --role-name ecsTaskExecutionRole >/dev/null 2>&1; then
 EOF
   aws iam create-role \
     --role-name ecsTaskExecutionRole \
-    --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+    --assume-role-policy-document "file://${TMP_DIR}/ecs-trust-policy.json"
 
   aws iam attach-role-policy \
     --role-name ecsTaskExecutionRole \
@@ -81,7 +93,7 @@ if ! aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${OIDC
 fi
 
 if ! aws iam get-role --role-name github-actions-ecs-deploy >/dev/null 2>&1; then
-  cat > /tmp/github-trust-policy.json <<EOF
+  cat > "${TMP_DIR}/github-trust-policy.json" <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -97,7 +109,7 @@ if ! aws iam get-role --role-name github-actions-ecs-deploy >/dev/null 2>&1; the
 EOF
   aws iam create-role \
     --role-name github-actions-ecs-deploy \
-    --assume-role-policy-document file:///tmp/github-trust-policy.json
+    --assume-role-policy-document "file://${TMP_DIR}/github-trust-policy.json"
 
   # Permisos minimos para build/push a ECR y deploy en ECS.
   # Para el curso se usan policies administradas; en produccion conviene
@@ -119,6 +131,19 @@ echo "   y en ecs-task-definition.json (campo executionRoleArn)."
 # ---------------------------------------------------------------------------
 VPC_ID="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
   --query 'Vpcs[0].VpcId' --output text --region "${AWS_REGION}")"
+
+# Algunas cuentas no tienen VPC "default" (se borro o nunca se creo).
+# En ese caso se usa la primera VPC disponible en la region.
+if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "None" ]; then
+  VPC_ID="$(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' \
+    --output text --region "${AWS_REGION}")"
+  echo ">> No hay VPC default, usando la primera VPC disponible: ${VPC_ID}"
+fi
+
+if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "None" ]; then
+  echo "ERROR: no se encontro ninguna VPC en ${AWS_REGION}. Crea una VPC (con subnet publica e internet gateway) antes de continuar." >&2
+  exit 1
+fi
 
 SUBNET_IDS="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="${VPC_ID}" \
   --query 'Subnets[].SubnetId' --output text --region "${AWS_REGION}" | tr '\t' ',')"
@@ -156,10 +181,10 @@ sed \
   -e "s|<AWS_ACCOUNT_ID>|${AWS_ACCOUNT_ID}|g" \
   -e "s|PLACEHOLDER_IMAGE|public.ecr.aws/nginx/nginx:latest|g" \
   -e "s|us-east-1|${AWS_REGION}|g" \
-  ../ecs-task-definition.json > /tmp/ecs-task-definition-initial.json
+  "$(dirname "$0")/../ecs-task-definition.json" > "${TMP_DIR}/ecs-task-definition-initial.json"
 
 aws ecs register-task-definition \
-  --cli-input-json file:///tmp/ecs-task-definition-initial.json \
+  --cli-input-json "file://${TMP_DIR}/ecs-task-definition-initial.json" \
   --region "${AWS_REGION}"
 
 # ---------------------------------------------------------------------------
