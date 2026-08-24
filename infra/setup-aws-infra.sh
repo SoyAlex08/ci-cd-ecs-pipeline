@@ -93,6 +93,9 @@ if ! aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${OIDC
 fi
 
 if ! aws iam get-role --role-name github-actions-ecs-deploy >/dev/null 2>&1; then
+  # El "*" en el sub tolera que GitHub agregue sufijos "@<id>" al org/repo
+  # cuando la cuenta o el repositorio fueron renombrados
+  # (ej. "repo:org@165087714/repo@1344516810:ref:refs/heads/main").
   cat > "${TMP_DIR}/github-trust-policy.json" <<EOF
 {
   "Version": "2012-10-17",
@@ -102,7 +105,7 @@ if ! aws iam get-role --role-name github-actions-ecs-deploy >/dev/null 2>&1; the
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:${GITHUB_ORG}/${GITHUB_REPO}:ref:refs/heads/main" }
+      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:${GITHUB_ORG}*/${GITHUB_REPO}*:ref:refs/heads/main" }
     }
   }]
 }
