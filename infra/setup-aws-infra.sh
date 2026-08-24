@@ -22,8 +22,8 @@ ECS_TASK_FAMILY="demo-task"
 CONTAINER_NAME="demo-app"
 LOG_GROUP="/ecs/${ECS_TASK_FAMILY}"
 
-GITHUB_ORG="<tu-usuario-o-org-de-github>"
-GITHUB_REPO="<nombre-del-repositorio>"
+GITHUB_ORG="SoyAlex08"
+GITHUB_REPO="ci-cd-ecs-pipeline"
 
 echo ">> Cuenta AWS: ${AWS_ACCOUNT_ID} / Region: ${AWS_REGION}"
 
