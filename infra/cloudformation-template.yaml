@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Implementacion funcional de la arquitectura de e-commerce (version MVP):
+  VPC con subredes publicas/privadas, ALB + ECS Fargate, RDS MySQL privada,
+  y monitoreo (CloudWatch + SNS). Equivalente en CloudFormation a los
+  scripts de infra/setup-*.sh de este mismo repositorio.
+  NOTA: no se pudo probar el despliegue de esta plantilla porque el usuario
+  IAM de este curso no tiene permisos de CloudFormation (cloudformation:*).
+  Se entrega como codigo de infraestructura revisado, no como stack verificado.
+
+  Limitaciones aceptadas para mantener el MVP simple (mismas que en los
+  scripts infra/setup-*.sh): el listener del ALB es HTTP (no HTTPS, porque
+  no hay dominio ni certificado ACM disponibles), el topico SNS no usa una
+  KMS key propia, y el ALB no tiene access logs a S3 habilitados.
+
+Parameters:
+  DBUsername:
+    Type: String
+    Default: appadmin
+    Description: Usuario administrador de RDS MySQL
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Password de RDS MySQL (no queda en el codigo, se pasa al crear/actualizar el stack)
+  DBName:
+    Type: String
+    Default: ecommercedb
+    Description: Nombre de la base de datos inicial
+  ContainerImage:
+    Type: String
+    Default: public.ecr.aws/nginx/nginx:latest
+    Description: >
+      Imagen del contenedor. Al crear el stack por primera vez se deja el
+      placeholder de nginx; el pipeline de CI/CD actualiza el stack (o el
+      servicio ECS directamente) con la imagen real una vez que existe en ECR.
+  AlertEmail:
+    Type: String
+    Description: Correo al que se suscribe el topico SNS de alertas de CloudWatch
+
+Mappings:
+  # 2 AZ fijas para mantener el template simple (igual que los scripts setup-*.sh)
+  AZConfig:
+    Primary:
+      AZ: us-east-1a
+    Secondary:
+      AZ: us-east-1c
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # Red: VPC, subredes publicas/privadas, IGW, tablas de rutas
+  # ---------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: ecommerce-vpc }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: ecommerce-igw }
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !FindInMap [AZConfig, Primary, AZ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: ecommerce-public-a }
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !FindInMap [AZConfig, Secondary, AZ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: ecommerce-public-b }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !FindInMap [AZConfig, Primary, AZ]
+      Tags:
+        - { Key: Name, Value: ecommerce-private-a }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !FindInMap [AZConfig, Secondary, AZ]
+      Tags:
+        - { Key: Name, Value: ecommerce-private-b }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - { Key: Name, Value: ecommerce-public-rt }
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # Tabla de rutas privada: solo ruta local (sin 0.0.0.0/0), sin NAT Gateway
+  # a proposito -- ver README, seccion de decisiones de costo.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - { Key: Name, Value: ecommerce-private-rt }
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------------
+  # Security groups en cascada: internet -> ALB -> ECS -> RDS
+  # ---------------------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Trafico HTTP publico hacia el ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: ecommerce-alb-sg }
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Trafico hacia las tareas ECS, solo desde el ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - { Key: Name, Value: ecommerce-app-sg }
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Trafico MySQL hacia RDS, solo desde las tareas ECS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - { Key: Name, Value: ecommerce-db-sg }
+
+  # ---------------------------------------------------------------------
+  # Application Load Balancer + Target Group + Listener
+  # ---------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ecommerce-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ecommerce-tg
+      Protocol: HTTP
+      Port: 8080
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------------
+  # ECR + CloudWatch Logs
+  # ---------------------------------------------------------------------
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ecommerce-app
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/ecommerce-app
+      RetentionInDays: 14
+
+  # ---------------------------------------------------------------------
+  # IAM: rol de ejecucion de tareas ECS (pull de ECR + logs)
+  # ---------------------------------------------------------------------
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsTaskExecutionRole-cfn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ---------------------------------------------------------------------
+  # ECS: cluster, task definition, servicio Fargate
+  # ---------------------------------------------------------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ecommerce-cluster
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: ecommerce-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: ecommerce-app
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - { ContainerPort: 8080, Protocol: tcp }
+          Environment:
+            - { Name: DB_HOST, Value: !GetAtt RDSInstance.Endpoint.Address }
+            - { Name: DB_NAME, Value: !Ref DBName }
+            - { Name: DB_USER, Value: !Ref DBUsername }
+            - { Name: DB_PASSWORD, Value: !Ref DBPassword }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: ecommerce-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+          SecurityGroups: [!Ref AppSecurityGroup]
+      LoadBalancers:
+        - ContainerName: ecommerce-app
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------------
+  # RDS MySQL privada (sin acceso publico)
+  # ---------------------------------------------------------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subredes privadas para ecommerce-db
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: ecommerce-db
+      DBName: !Ref DBName
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: "20"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref DBSecurityGroup]
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      StorageEncrypted: true
+
+  # ---------------------------------------------------------------------
+  # Monitoreo: SNS + alarmas de CloudWatch
+  # ---------------------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ecommerce-alerts
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref AlertEmail }
+
+  ECSCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ecommerce-ecs-cpu-alta
+      AlarmDescription: CPU del servicio ECS por encima de 80% durante 10 minutos
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: ClusterName, Value: !Ref ECSCluster }
+        - { Name: ServiceName, Value: !GetAtt ECSService.Name } # nombre corto del servicio ECS ("ecommerce-service")
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  ALBUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ecommerce-alb-hosts-no-saludables
+      AlarmDescription: Al menos un target detras del ALB esta unhealthy
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  RDSCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ecommerce-rds-cpu-alta
+      AlarmDescription: CPU de RDS por encima de 80% durante 10 minutos
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: DBInstanceIdentifier, Value: !Ref RDSInstance }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  RDSFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ecommerce-rds-espacio-bajo
+      AlarmDescription: Espacio libre en RDS por debajo de 2 GB
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - { Name: DBInstanceIdentifier, Value: !Ref RDSInstance }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+Outputs:
+  ALBDNSName:
+    Description: URL publica de la aplicacion
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+  RDSEndpoint:
+    Description: Endpoint de la base de datos (solo alcanzable desde dentro de la VPC)
+    Value: !GetAtt RDSInstance.Endpoint.Address
+  ECRRepositoryUri:
+    Description: URI del repositorio ECR para el pipeline de CI/CD
+    Value: !GetAtt ECRRepository.RepositoryUri

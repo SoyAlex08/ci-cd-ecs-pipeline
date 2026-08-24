@@ -58,6 +58,12 @@ alcanzable directamente desde internet, solo el ALB.
   libre de RDS).
 - `infra/teardown.sh` — destruye ALB, servicio/cluster ECS, RDS, alarmas y
   topico SNS, para dejar de pagar por estos recursos al terminar de probar.
+- `infra/cloudformation-template.yaml` — la misma arquitectura descrita como
+  una sola plantilla de CloudFormation (IaC declarativo), equivalente a los
+  4 scripts `setup-*.sh` de arriba. **No se pudo probar el despliegue**: el
+  usuario IAM de este curso no tiene permisos de `cloudformation:*`. Se
+  entrega como codigo revisado, documentando esa limitacion en el propio
+  archivo.
 
 ## Como se desplego (orden real de ejecucion)
 
