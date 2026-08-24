@@ -1,5 +1,5 @@
 {
-  "family": "demo-task",
+  "family": "ecommerce-task",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
@@ -7,7 +7,7 @@
   "executionRoleArn": "arn:aws:iam::590251390369:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
-      "name": "demo-app",
+      "name": "ecommerce-app",
       "image": "PLACEHOLDER_IMAGE",
       "essential": true,
       "portMappings": [
@@ -16,10 +16,11 @@
           "protocol": "tcp"
         }
       ],
+      "environment": [],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/demo-task",
+          "awslogs-group": "/ecs/ecommerce-app",
           "awslogs-region": "us-east-1",
           "awslogs-stream-prefix": "ecs"
         }

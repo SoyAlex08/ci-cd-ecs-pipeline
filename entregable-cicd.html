@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Entregable CI/CD</title>
+<style>
+  body {
+    font-family: Calibri, Arial, sans-serif;
+    color: #111;
+    max-width: 720px;
+    margin: 40px auto;
+    line-height: 1.5;
+    font-size: 15px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  .meta { color: #555; font-size: 13px; margin-bottom: 24px; }
+  pre {
+    background: #f4f4f4;
+    padding: 10px;
+    font-size: 12px;
+    overflow-x: auto;
+    border-radius: 4px;
+    white-space: pre-wrap;
+  }
+  .captura {
+    border: 2px dashed #999;
+    padding: 30px 10px;
+    text-align: center;
+    color: #777;
+    font-size: 13px;
+    margin: 10px 0 20px 0;
+  }
+  .nota {
+    background: #fff8e1;
+    border-left: 3px solid #e0a800;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #7a5c00;
+    margin: 10px 0;
+  }
+  img.captura-real { max-width: 100%; border: 1px solid #ccc; margin: 10px 0 20px 0; }
+  p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<h1>Pipeline CI/CD - Despliegue automatico en AWS ECS</h1>
+<p class="meta">Nombre: ______________________ &nbsp;&nbsp; Curso: ______________________ &nbsp;&nbsp; Fecha: 23/08/2026</p>
+
+<div class="nota">
+  Nota para mi: borrar este recuadro amarillo antes de exportar a PDF. Reemplazar los recuadros
+  punteados por mis capturas reales (Insertar &gt; Imagen en Word, o arrastrar la imagen si es HTML).
+</div>
+
+<h2>Objetivo</h2>
+<p>
+  Configurar un pipeline de CI/CD que construya una imagen Docker, la suba a un registry en la nube
+  y despliegue la app automaticamente cada vez que se hace push a la rama main.
+</p>
+
+<h2>Que hice</h2>
+<p>
+  Use la app sencilla de nginx que ya tenia de una semana anterior (un Dockerfile + un index.html).
+  Cree un repositorio nuevo en GitHub (SoyAlex08/ci-cd-ecs-pipeline) y ahi arme el pipeline con
+  GitHub Actions.
+</p>
+<p>
+  El pipeline hace tres cosas cuando detecta un push a main:
+</p>
+<p>
+  1. Construye la imagen Docker.<br>
+  2. La sube a Amazon ECR (el registry de imagenes de AWS).<br>
+  3. Actualiza la Task Definition de ECS con la imagen nueva y despliega en el servicio de ECS Fargate.
+</p>
+<p>
+  Para que GitHub Actions pudiera autenticarse contra mi cuenta de AWS sin guardar llaves de acceso,
+  configure un rol de IAM que se asume via OIDC (el propio GitHub le pide a AWS un token temporal en
+  cada ejecucion). La infraestructura de AWS (repositorio ECR, cluster ECS, rol de ejecucion, red)
+  la cree una sola vez con un script de AWS CLI antes de correr el pipeline.
+</p>
+
+<h2>Archivo del pipeline (.github/workflows/deploy.yml)</h2>
+<pre>name: Build, Push and Deploy to Amazon ECS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: aws-ecr-ecs-demo
+  ECS_CLUSTER: demo-cluster
+  ECS_SERVICE: demo-service
+  ECS_TASK_DEFINITION: ecs-task-definition.json
+  CONTAINER_NAME: demo-app
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build image, push to ECR y desplegar en ECS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::590251390369:role/github-actions-ecs-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login en Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag y push de la imagen Docker
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Renderizar nueva Task Definition con la imagen actualizada
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Desplegar Task Definition en el servicio ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+</pre>
+
+<h2>Captura 1 - El archivo deploy.yml en GitHub</h2>
+<div class="captura">[ Pegar aqui screenshot del archivo .github/workflows/deploy.yml abierto en GitHub ]</div>
+
+<h2>Captura 2 - Ejecucion exitosa en GitHub Actions</h2>
+<div class="captura">[ Pegar aqui screenshot de la pestana Actions con la corrida en verde y los pasos completados ]</div>
+
+<h2>Captura 3 - Imagen subida a Amazon ECR</h2>
+<div class="captura">[ Pegar aqui screenshot de la consola de ECR mostrando la imagen con el tag del commit ]</div>
+
+<h2>Captura 4 - Servicio corriendo en Amazon ECS</h2>
+<div class="captura">[ Pegar aqui screenshot de la consola de ECS con el servicio y la tarea en estado RUNNING ]</div>
+
+<h2>Captura 5 - App funcionando</h2>
+<div class="captura">[ Pegar aqui screenshot del navegador mostrando la pagina "Hola desde AWS ECS" en la IP publica de la tarea ]</div>
+
+<h2>Conclusion</h2>
+<p>
+  El pipeline quedo funcionando de punta a punta: cada push a main dispara el build, sube la imagen a
+  ECR y actualiza el servicio en ECS sin que yo tenga que hacer nada manual. Lo mas complicado fue la
+  parte de permisos entre GitHub y AWS (el rol OIDC), el resto fue bastante directo.
+</p>
+
+</body>
+</html>
