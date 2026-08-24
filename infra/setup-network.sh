@@ -93,8 +93,8 @@ DB_SG_ID="$(find_or_create_sg "${DB_SG_NAME}" "Trafico MySQL hacia RDS, solo des
 aws ec2 authorize-security-group-ingress --group-id "${ALB_SG_ID}" --protocol tcp --port 80 --cidr 0.0.0.0/0 \
   --region "${AWS_REGION}" 2>&1 | grep -q "InvalidPermission.Duplicate" && echo ">> Regla ALB 80 ya existia." || true
 
-aws ec2 authorize-security-group-ingress --group-id "${APP_SG_ID}" --protocol tcp --port 80 \
-  --source-group "${ALB_SG_ID}" --region "${AWS_REGION}" 2>&1 | grep -q "InvalidPermission.Duplicate" && echo ">> Regla APP 80 ya existia." || true
+aws ec2 authorize-security-group-ingress --group-id "${APP_SG_ID}" --protocol tcp --port 8080 \
+  --source-group "${ALB_SG_ID}" --region "${AWS_REGION}" 2>&1 | grep -q "InvalidPermission.Duplicate" && echo ">> Regla APP 8080 ya existia." || true
 
 aws ec2 authorize-security-group-ingress --group-id "${DB_SG_ID}" --protocol tcp --port 3306 \
   --source-group "${APP_SG_ID}" --region "${AWS_REGION}" 2>&1 | grep -q "InvalidPermission.Duplicate" && echo ">> Regla DB 3306 ya existia." || true
@@ -118,7 +118,7 @@ TG_ARN="$(aws elbv2 describe-target-groups --names "${TG_NAME}" --region "${AWS_
   --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || true)"
 
 if [ -z "${TG_ARN}" ] || [ "${TG_ARN}" = "None" ]; then
-  TG_ARN="$(aws elbv2 create-target-group --name "${TG_NAME}" --protocol HTTP --port 80 \
+  TG_ARN="$(aws elbv2 create-target-group --name "${TG_NAME}" --protocol HTTP --port 8080 \
     --vpc-id "${VPC_ID}" --target-type ip \
     --health-check-path /health --health-check-interval-seconds 30 \
     --healthy-threshold-count 2 --unhealthy-threshold-count 3 \

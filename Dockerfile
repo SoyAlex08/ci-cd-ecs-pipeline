@@ -10,6 +10,7 @@ COPY app.py .
 RUN useradd --no-create-home --shell /usr/sbin/nologin appuser
 USER appuser
 
-EXPOSE 80
+# Puerto no privilegiado: como usuario no-root no se puede escuchar en el 80.
+EXPOSE 8080
 
-CMD ["gunicorn", "--bind", "0.0.0.0:80", "--workers", "2", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "app:app"]

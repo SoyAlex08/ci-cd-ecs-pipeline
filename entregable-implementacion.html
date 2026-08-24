@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Entregable Implementacion Funcional</title>
+<style>
+  body {
+    font-family: Calibri, Arial, sans-serif;
+    color: #111;
+    max-width: 900px;
+    margin: 40px auto;
+    line-height: 1.5;
+    font-size: 15px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 14px; margin-top: 16px; margin-bottom: 4px; }
+  .meta { color: #555; font-size: 13px; margin-bottom: 24px; }
+  .nota {
+    background: #fff8e1;
+    border-left: 3px solid #e0a800;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #7a5c00;
+    margin: 10px 0;
+  }
+  p, li { margin: 5px 0; }
+  ul { margin: 6px 0; padding-left: 22px; }
+  table { border-collapse: collapse; margin: 10px 0; font-size: 13px; width: 100%; }
+  td, th { border: 1px solid #ccc; padding: 5px 9px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  pre { background: #f7f7f7; border: 1px solid #ddd; padding: 8px 10px; font-size: 12px; overflow-x: auto; }
+  .diagrama { text-align: center; margin: 16px 0; }
+  .diagrama svg { max-width: 100%; height: auto; border: 1px solid #ddd; }
+</style>
+</head>
+<body>
+
+<h1>Implementacion funcional y segura de la arquitectura cloud</h1>
+<p class="meta">Nombre: ______________________ &nbsp;&nbsp; Curso: ______________________ &nbsp;&nbsp; Fecha: 24/08/2026</p>
+
+<div class="nota">
+  Nota para mi: borrar este recuadro amarillo antes de exportar a PDF, y pegar aqui las capturas
+  de: ALB con estado activo, ECS con el servicio "ecommerce-service" con 2 tareas RUNNING,
+  RDS "ecommerce-db" con PubliclyAccessible=No, pestana Actions del pipeline en verde, navegador
+  mostrando la pagina de "conexion exitosa", y CloudWatch con las 4 alarmas y el log group.
+</div>
+
+<h2>1. Objetivo y alcance</h2>
+<p>
+  Este entregable valida que la arquitectura propuesta en el modulo de diseno (Semana 11,
+  "arquitectura-ecommerce-cloud") se puede llevar a una implementacion real, funcional y segura
+  en AWS. El diseno original incluye piezas como CloudFront/WAF, ElastiCache, SQS, Cognito y SES;
+  para esta entrega se acoto el alcance a los 5 requisitos puntuales que pide la rubrica: red y
+  balanceador, app en contenedores, base de datos gestionada, pipeline CI/CD, y logs/alertas
+  basicas. Las piezas fuera de alcance quedan documentadas como trabajo futuro en la seccion 7.
+</p>
+
+<h2>2. Arquitectura implementada</h2>
+<div class="diagrama">
+<svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg" font-family="Calibri, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#333"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1000" height="620" fill="#ffffff"/>
+
+  <rect x="20" y="20" width="140" height="46" rx="6" fill="#e8f0fe" stroke="#4a6fa5"/>
+  <text x="90" y="48" text-anchor="middle" font-size="13">Usuario (navegador)</text>
+  <line x1="160" y1="43" x2="410" y2="43" stroke="#333" marker-end="url(#arrow)"/>
+  <text x="280" y="35" text-anchor="middle" font-size="10" fill="#666">HTTP :80</text>
+
+  <rect x="40" y="110" width="920" height="470" rx="8" fill="none" stroke="#888" stroke-dasharray="6,4"/>
+  <text x="55" y="130" font-size="12" fill="#555">VPC (10.0.0.0/16)</text>
+
+  <rect x="410" y="20" width="200" height="50" rx="6" fill="#fdf2e0" stroke="#c78a2b"/>
+  <text x="510" y="42" text-anchor="middle" font-size="13">Application Load Balancer</text>
+  <text x="510" y="58" text-anchor="middle" font-size="10">sg: ecommerce-alb-sg (80 desde 0.0.0.0/0)</text>
+
+  <rect x="70" y="160" width="380" height="170" rx="8" fill="#fafafa" stroke="#bbb" stroke-dasharray="4,3"/>
+  <text x="85" y="178" font-size="11" fill="#777">Subredes PUBLICAS (2 AZ)</text>
+
+  <rect x="100" y="200" width="150" height="55" rx="6" fill="#e8f0fe" stroke="#4a6fa5"/>
+  <text x="175" y="222" text-anchor="middle" font-size="12">ECS Fargate</text>
+  <text x="175" y="237" text-anchor="middle" font-size="10">tarea 1 (AZ a)</text>
+
+  <rect x="280" y="200" width="150" height="55" rx="6" fill="#e8f0fe" stroke="#4a6fa5"/>
+  <text x="355" y="222" text-anchor="middle" font-size="12">ECS Fargate</text>
+  <text x="355" y="237" text-anchor="middle" font-size="10">tarea 2 (AZ c)</text>
+  <text x="260" y="285" text-anchor="middle" font-size="10" fill="#666">sg: ecommerce-app-sg (8080 solo desde ALB)</text>
+
+  <line x1="480" y1="70" x2="230" y2="200" stroke="#333" marker-end="url(#arrow)"/>
+  <line x1="540" y1="70" x2="330" y2="200" stroke="#333" marker-end="url(#arrow)"/>
+
+  <rect x="550" y="160" width="380" height="170" rx="8" fill="#fafafa" stroke="#bbb" stroke-dasharray="4,3"/>
+  <text x="565" y="178" font-size="11" fill="#777">Subredes PRIVADAS (2 AZ, sin ruta a internet)</text>
+
+  <rect x="670" y="210" width="180" height="55" rx="6" fill="#fdeaea" stroke="#b3453e"/>
+  <text x="760" y="232" text-anchor="middle" font-size="12">RDS MySQL</text>
+  <text x="760" y="247" text-anchor="middle" font-size="10">PubliclyAccessible: No</text>
+  <text x="760" y="300" text-anchor="middle" font-size="10" fill="#666">sg: ecommerce-db-sg (3306 solo desde app-sg)</text>
+
+  <line x1="430" y1="227" x2="666" y2="230" stroke="#333" marker-end="url(#arrow)"/>
+
+  <rect x="70" y="360" width="860" height="55" rx="6" fill="#f0f0f0" stroke="#888"/>
+  <text x="500" y="392" text-anchor="middle" font-size="12">CloudWatch Logs (/ecs/ecommerce-app) + 4 alarmas -&gt; SNS -&gt; correo</text>
+
+  <rect x="70" y="440" width="860" height="55" rx="6" fill="#eef2f7" stroke="#888"/>
+  <text x="500" y="472" text-anchor="middle" font-size="12">GitHub Actions: push a main -&gt; build/push imagen a ECR -&gt; render task def (secrets de BD) -&gt; deploy ECS</text>
+
+  <rect x="70" y="520" width="860" height="40" rx="6" fill="#fff8e1" stroke="#e0a800"/>
+  <text x="500" y="545" text-anchor="middle" font-size="11">Sin NAT Gateway (costo): tareas ECS en subred publica con IP publica, pero solo aceptan trafico del ALB</text>
+</svg>
+</div>
+
+<h2>3. Mapeo de requisitos a lo implementado</h2>
+<table>
+  <tr><th>Requisito</th><th>Como se cumplio</th></tr>
+  <tr>
+    <td>Redes, subredes, balanceadores</td>
+    <td>VPC con 2 subredes publicas (para el ALB y las tareas ECS) y 2 subredes privadas (para RDS)
+    en distintas zonas de disponibilidad. Application Load Balancer internet-facing con target
+    group tipo <code>ip</code> y health check en <code>/health</code>.</td>
+  </tr>
+  <tr>
+    <td>App en contenedores</td>
+    <td>API Flask empaquetada en Docker, corriendo como servicio ECS Fargate con 2 tareas
+    (desired count 2) detras del ALB.</td>
+  </tr>
+  <tr>
+    <td>Base de datos gestionada</td>
+    <td>RDS MySQL 8.0, <code>PubliclyAccessible=false</code>, en subredes privadas, alcanzable
+    solo desde el security group de las tareas ECS. La app confirma la conexion en tiempo real
+    en la ruta <code>/</code>.</td>
+  </tr>
+  <tr>
+    <td>Pipeline CI/CD</td>
+    <td>GitHub Actions: cada push a <code>main</code> construye la imagen, la sube a ECR,
+    renderiza la Task Definition (inyectando la conexion a la BD desde GitHub Secrets) y
+    actualiza el servicio ECS, esperando a que quede estable.</td>
+  </tr>
+  <tr>
+    <td>Logs y alertas basicas</td>
+    <td>Logs de los contenedores en CloudWatch Logs. 4 alarmas de CloudWatch (CPU de ECS, hosts
+    unhealthy en el ALB, CPU y espacio libre de RDS) notificando por correo via un topico SNS.</td>
+  </tr>
+</table>
+
+<h2>4. Seguridad</h2>
+<ul>
+  <li><b>Security groups en cascada:</b> internet solo puede hablarle al ALB (puerto 80); el
+  ALB es el unico que puede hablarle a las tareas ECS (puerto 8080); y las tareas ECS son las
+  unicas que pueden hablarle a RDS (puerto 3306). Ningun recurso de computo o base de datos tiene
+  una regla de entrada abierta a <code>0.0.0.0/0</code>.</li>
+  <li><b>Base de datos sin acceso publico:</b> a diferencia del modulo anterior de RDS (donde la
+  base era publica y se restringia por IP), aqui <code>PubliclyAccessible=false</code> y vive en
+  subredes sin ruta a internet.</li>
+  <li><b>Sin credenciales en el codigo:</b> la password de la base de datos nunca se escribe en
+  el repositorio. Se genero localmente, se guardo como secreto cifrado en GitHub Actions
+  (<code>DB_HOST</code>, <code>DB_NAME</code>, <code>DB_USER</code>, <code>DB_PASSWORD</code>) y
+  el pipeline la inyecta como variable de entorno de la tarea al desplegar.</li>
+  <li><b>Limitacion aceptada:</b> el usuario IAM de este curso no tiene permisos sobre Secrets
+  Manager ni SSM Parameter Store, que serian la forma mas segura de manejar este secreto (con
+  rotacion y sin que quede visible en la Task Definition). Queda documentado como el primer
+  punto a mejorar si se dispusiera de esos permisos.</li>
+  <li><b>Autenticacion del pipeline sin llaves estaticas:</b> GitHub Actions asume un rol IAM via
+  OIDC (<code>github-actions-ecs-deploy</code>), sin access keys guardadas como secreto.</li>
+  <li><b>Contenedor sin privilegios de root:</b> la imagen Docker corre la app con un usuario sin
+  privilegios (<code>appuser</code>), no como root. Como consecuencia, el contenedor escucha en
+  el puerto 8080 (no privilegiado) en vez del 80: un usuario sin privilegios no puede abrir
+  puertos por debajo de 1024. El ALB sigue exponiendo el 80 hacia internet y reenvia al 8080
+  del contenedor.</li>
+</ul>
+
+<h2>5. Evidencia de funcionamiento</h2>
+<p>
+  URL publica del balanceador (reemplazar por captura de navegador mostrando la pagina de
+  "conexion exitosa" a la base de datos):
+</p>
+<pre>http://ecommerce-alb-988479102.us-east-1.elb.amazonaws.com</pre>
+<p>Otras evidencias a incluir (capturas de consola AWS y de GitHub):</p>
+<ul>
+  <li>ECS: servicio <code>ecommerce-service</code> en el cluster <code>ecommerce-cluster</code>
+  con 2 tareas en estado <code>RUNNING</code>.</li>
+  <li>ALB: target group <code>ecommerce-tg</code> con los 2 targets en estado <code>healthy</code>.</li>
+  <li>RDS: instancia <code>ecommerce-db</code> con estado <code>available</code> y
+  <code>PubliclyAccessible = No</code>.</li>
+  <li>GitHub Actions: ejecucion del workflow <code>Build, Push and Deploy to Amazon ECS</code> en
+  verde, con los 5 pasos completados.</li>
+  <li>CloudWatch: log group <code>/ecs/ecommerce-app</code> con logs recientes, y las 4 alarmas
+  en estado <code>OK</code> o <code>INSUFFICIENT_DATA</code>.</li>
+</ul>
+
+<h2>6. Estimacion de costo de esta implementacion (MVP)</h2>
+<table>
+  <tr><th>Recurso</th><th>Costo aprox. mientras esta activo</th></tr>
+  <tr><td>Application Load Balancer</td><td>~$0.023/hora + LCU</td></tr>
+  <tr><td>ECS Fargate (2 tareas, 0.25 vCPU / 0.5 GB c/u)</td><td>~$0.02/hora en total</td></tr>
+  <tr><td>RDS db.t3.micro (single-AZ, 20 GB)</td><td>~$0.017/hora + almacenamiento</td></tr>
+  <tr><td>CloudWatch Logs + alarmas + SNS</td><td>Centavos, dentro de la capa gratuita en la mayoria de casos</td></tr>
+</table>
+<p>
+  Estimado total: menos de $1 USD por cada hora que se deje corriendo. Por eso se incluye
+  <code>infra/teardown.sh</code> para apagar todo apenas se termine de validar/entregar.
+</p>
+
+<h2>7. Diferencias respecto al diseno completo de Semana 11 (trabajo futuro)</h2>
+<ul>
+  <li><b>CloudFront + WAF:</b> no se implemento; el ALB queda expuesto directo. Para produccion
+  se agregaria un CDN con WAF delante del ALB.</li>
+  <li><b>ElastiCache (Redis):</b> no incluido; en esta version de bajo trafico no hace falta
+  cache para sesion/carrito.</li>
+  <li><b>SQS + Lambda para ordenes asincronas:</b> no incluido en este MVP; el modulo de Lambda
+  (<code>lambda-api-demo</code>) ya demostro esa pieza por separado.</li>
+  <li><b>Cognito y SES:</b> no incluidos; no hay flujo de registro/login ni envio de correos en
+  esta version funcional.</li>
+  <li><b>RDS Multi-AZ:</b> se uso single-AZ para bajar el costo del MVP; el diseno de Semana 11
+  ya justifica por que Multi-AZ conviene quando haya trafico real.</li>
+  <li><b>NAT Gateway:</b> no se uso; las tareas ECS estan en subred publica con IP publica en vez
+  de subred privada con NAT, para no sumar ~$32/mes de costo fijo. La app sigue sin quedar
+  expuesta directamente porque el security group solo acepta trafico del ALB.</li>
+</ul>
+
+<h2>8. Conclusion</h2>
+<p>
+  Se logro llevar el diseno de Semana 11 a una implementacion real y verificable en AWS,
+  cumpliendo los 5 requisitos pedidos con decisiones de seguridad concretas (base de datos
+  privada, security groups en cascada, sin credenciales en el codigo) y documentando de forma
+  explicita las dos limitaciones tecnicas encontradas en el camino: la ausencia de Secrets
+  Manager/SSM en la cuenta del curso, y el recorte de alcance frente al diseno completo de
+  e-commerce para mantener el costo y la complejidad dentro de lo que pide esta entrega.
+</p>
+
+</body>
+</html>

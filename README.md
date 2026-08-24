@@ -1,44 +1,119 @@
-# aws-ecr-ecs-demo
+# Implementacion funcional de la arquitectura cloud (e-commerce, version MVP)
 
-App Docker minima (nginx + `index.html`) usada para practicar un pipeline de
-CI/CD que construye la imagen, la sube a Amazon ECR y despliega
-automaticamente en Amazon ECS (Fargate) en cada push a `main`.
+Implementacion real y funcional de la arquitectura propuesta en el modulo de
+diseno (`arquitectura-ecommerce-cloud/entregable-arquitectura.html`), acotada
+a los 5 requisitos de esta entrega: red/balanceador, app en contenedores,
+base de datos gestionada, pipeline CI/CD y logs/alertas basicas.
+
+Este repositorio evoluciona el pipeline construido en el modulo de CI/CD
+(`ci-cd-ecs-pipeline`): la app dejo de ser un `index.html` estatico servido
+por nginx y ahora es una API Flask que se conecta a una base de datos RDS
+MySQL real, desplegada detras de un Application Load Balancer.
+
+## Arquitectura implementada
+
+```
+Internet
+   |
+   v
+Application Load Balancer (subredes publicas, 2 AZ)
+   |  (solo puerto 80 abierto a 0.0.0.0/0)
+   v
+ECS Fargate service (2 tareas, puerto 8080, subredes publicas, security
+   |                  group que solo acepta trafico del ALB en 8080; el
+   |                  contenedor corre como usuario no-root y no puede
+   |                  escuchar en el 80)
+   v
+RDS MySQL (subredes PRIVADAS, sin IP publica, security group que solo
+            acepta trafico 3306 desde las tareas ECS)
+
+CloudWatch Logs (contenedores) + CloudWatch Alarms -> SNS -> correo
+GitHub Actions: push a main -> build/push imagen a ECR -> deploy en ECS
+```
+
+Security groups en cascada (`ecommerce-alb-sg` -> `ecommerce-app-sg` ->
+`ecommerce-db-sg`): ningun recurso de computo o base de datos queda
+alcanzable directamente desde internet, solo el ALB.
 
 ## Estructura
 
-- `Dockerfile`, `index.html` — la aplicacion.
-- `.github/workflows/deploy.yml` — pipeline de GitHub Actions (build, push a ECR, deploy en ECS).
-- `ecs-task-definition.json` — plantilla de Task Definition que el pipeline actualiza con la imagen nueva en cada ejecucion.
-- `infra/setup-aws-infra.sh` — script documentado con los comandos AWS CLI para crear, **una sola vez y a mano**, la infraestructura previa (ECR, cluster/servicio ECS, roles IAM, red). El pipeline no lo ejecuta.
+- `app.py`, `requirements.txt`, `Dockerfile` — API Flask que confirma la
+  conexion a MySQL en `/` y expone `/health` para el health check del ALB.
+- `ecs-task-definition.json` — plantilla de Task Definition (el pipeline la
+  rellena con la imagen nueva y las variables de conexion a la BD).
+- `.github/workflows/deploy.yml` — pipeline: build, push a ECR, render de la
+  Task Definition (inyecta `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` desde
+  GitHub Secrets) y deploy en ECS.
+- `infra/setup-network.sh` — subredes publicas/privadas adicionales,
+  security groups en cascada, ALB + target group + listener, cluster ECS,
+  log group y repositorio ECR. Idempotente (se puede volver a correr).
+- `infra/setup-rds.sh` — instancia RDS MySQL privada (`PubliclyAccessible=false`)
+  en las subredes privadas. Genera una password aleatoria en `.db-password.txt`
+  (no se sube a git).
+- `infra/setup-ecs-service.sh` — registra una Task Definition placeholder
+  (nginx) y crea el servicio ECS detras del ALB, para tener el servicio
+  arriba antes de que corra el primer deploy del pipeline.
+- `infra/setup-monitoring.sh` — topico SNS + suscripcion por correo, y 4
+  alarmas de CloudWatch (CPU de ECS, hosts unhealthy del ALB, CPU y espacio
+  libre de RDS).
+- `infra/teardown.sh` — destruye ALB, servicio/cluster ECS, RDS, alarmas y
+  topico SNS, para dejar de pagar por estos recursos al terminar de probar.
 
-## Pasos para dejarlo funcionando
+## Como se desplego (orden real de ejecucion)
 
-1. **Crear el repositorio en GitHub** y subir este contenido a la rama `main`.
-2. **Aprovisionar AWS** (una vez, con tus propias credenciales `aws configure`):
-   - Edita las variables `GITHUB_ORG` / `GITHUB_REPO` en `infra/setup-aws-infra.sh`.
-   - Ejecuta el script: `bash infra/setup-aws-infra.sh`.
-   - Anota el ARN del rol `github-actions-ecs-deploy` que imprime al final.
-3. **Reemplazar placeholders**:
-   - En `.github/workflows/deploy.yml`, sustituye `<AWS_ACCOUNT_ID>` por el ID real de tu cuenta AWS (o el ARN completo del rol).
-   - En `ecs-task-definition.json`, sustituye `<AWS_ACCOUNT_ID>` en `executionRoleArn`.
-4. **Hacer push a `main`** — esto dispara el workflow automaticamente (tambien se puede lanzar a mano desde la pestana Actions con "Run workflow").
-5. **Verificar el despliegue**: en la consola de ECS, el servicio `demo-service` debe quedar `ACTIVE` con la tarea `RUNNING`; la IP publica de la tarea (puerto 80) debe mostrar la pagina "Hola desde AWS ECS".
+```bash
+bash infra/setup-network.sh                       # red, SGs, ALB, cluster, ECR
+bash infra/setup-rds.sh                           # RDS privada (tarda 5-10 min)
+bash infra/setup-ecs-service.sh                   # servicio ECS con placeholder
+gh secret set DB_HOST     --body "<endpoint-rds>"
+gh secret set DB_NAME     --body "ecommercedb"
+gh secret set DB_USER     --body "appadmin"
+gh secret set DB_PASSWORD --body "$(cat .db-password.txt)"
+bash infra/setup-monitoring.sh tu-correo@ejemplo.com
+git push origin main                              # dispara el pipeline real
+```
 
-## Que capturar para el PDF del entregable
+## Decisiones de seguridad y sus limitaciones
 
-1. Vista del repositorio en GitHub mostrando `.github/workflows/deploy.yml`.
-2. Contenido del archivo `deploy.yml` (puede ser la misma vista del editor de GitHub).
-3. Pestana **Actions** con la ejecucion del workflow en verde (exitosa), mostrando los pasos: build/push a ECR y deploy a ECS.
-4. Consola de **Amazon ECR** con la imagen subida (tag con el SHA del commit).
-5. Consola de **Amazon ECS** con el servicio y la tarea en estado `RUNNING`.
-6. Navegador mostrando la app respondiendo en la IP publica de la tarea.
+- **RDS sin acceso publico**: a diferencia del modulo de base de datos
+  (`rds-mysql-demo`, publica pero restringida por IP), aqui la base de datos
+  vive en subredes privadas y solo es alcanzable desde el security group de
+  las tareas ECS.
+- **Sin NAT Gateway**: para mantener el costo bajo en este MVP, las tareas
+  ECS corren en subredes publicas con IP publica asignada (necesitan salida
+  a internet para descargar la imagen de ECR y escribir logs), pero su
+  security group solo acepta trafico entrante del ALB — no quedan expuestas
+  directamente a internet aunque tengan IP publica.
+- **Credenciales de BD sin Secrets Manager**: el usuario IAM de este curso
+  no tiene permisos sobre Secrets Manager ni SSM Parameter Store. La
+  password de RDS se genera localmente, se guarda solo en GitHub Secrets
+  (cifrados) y el pipeline la inyecta como variable de entorno en la Task
+  Definition al desplegar. Esto es mejor que dejarla en el codigo, pero es
+  menos seguro que Secrets Manager: cualquier IAM principal con permiso
+  `ecs:DescribeTaskDefinition` puede leerla. En un entorno real, este seria
+  el primer punto a corregir en cuanto se disponga de esos permisos.
+- **Permisos IAM ampliados a mano**: las policies administradas que trae el
+  usuario del curso no alcanzaban para crear el ALB
+  (`ec2:GetSecurityGroupsForVpc`, `ec2:CreateTags`) ni el topico SNS de
+  alertas (`sns:CreateTopic`, `sns:Subscribe`, etc.) ni consultar la salud
+  de los targets (`elasticloadbalancing:DescribeTargetHealth`). Se creo una
+  policy adicional minima, `ecommerce-extra-ec2-elb-perms`, con exactamente
+  esas acciones.
 
-## Notas de seguridad
+## Logs y alertas
 
-El pipeline usa **OIDC** (`aws-actions/configure-aws-credentials`) en vez de
-access keys estaticas guardadas como secreto: GitHub Actions obtiene
-credenciales temporales al asumir el rol `github-actions-ecs-deploy`, cuya
-trust policy solo permite el `assume` desde este repositorio y la rama
-`main`. Las policies adjuntas al rol en el script son policies administradas
-por simplicidad; en un entorno real conviene una policy propia de permisos
-minimos.
+- Logs de los contenedores en CloudWatch, log group `/ecs/ecommerce-app`.
+- 4 alarmas (ver `infra/setup-monitoring.sh`) notifican por correo via SNS:
+  CPU alta en ECS, hosts unhealthy en el ALB, CPU alta en RDS y espacio
+  libre bajo en RDS. La suscripcion por correo debe confirmarse manualmente
+  (enlace que envia AWS) antes de recibir notificaciones.
+
+## Apagar todo al terminar
+
+```bash
+bash infra/teardown.sh
+```
+
+No borra el repositorio ECR, los roles IAM reutilizados entre modulos
+(`ecsTaskExecutionRole`, `github-actions-ecs-deploy`) ni la policy IAM
+minima agregada a mano; esos se pueden dejar entre modulos del curso.
